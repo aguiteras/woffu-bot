@@ -1,0 +1,45 @@
+services:
+  woffu-slack-bot:
+    build: .
+    container_name: woffu-slack-bot
+    restart: unless-stopped
+
+    environment:
+      SLACK_TOKEN: "${SLACK_TOKEN}"
+      BOT_BASE_URL: "https://woffu.bofh.cat"
+      WOFFU_BASE_URL: "https://app.woffu.com"
+      PORT: "8001"
+
+    volumes:
+      - woffu-bot-data:/data
+
+    networks:
+      - traefik-proxy
+
+    labels:
+      - "traefik.enable=true"
+
+      # Router HTTPS (domini del bot)
+      - "traefik.http.routers.woffu-bot.rule=Host(`woffu.bofh.cat`)"
+      - "traefik.http.routers.woffu-bot.entrypoints=websecure"
+      - "traefik.http.routers.woffu-bot.tls.certresolver=le"
+
+      # Router HTTP -> redirecció a HTTPS
+      - "traefik.http.routers.woffu-bot-redirect.rule=Host(`woffu.bofh.cat`)"
+      - "traefik.http.routers.woffu-bot-redirect.entrypoints=web"
+      - "traefik.http.routers.woffu-bot-redirect.middlewares=redirect-to-https"
+
+      # Middleware de redirecció (reutilitzable)
+      - "traefik.http.middlewares.redirect-to-https.redirectscheme.scheme=https"
+
+      # Port intern del servei (el Koa escolta a 8001)
+      - "traefik.http.services.woffu-bot.loadbalancer.server.port=8001"
+
+volumes:
+  woffu-bot-data:
+
+networks:
+  traefik-proxy:
+    external: true
+    name: traefik-proxy
+
