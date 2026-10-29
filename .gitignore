@@ -1,2 +1,6 @@
 .env
 db.json
+node_modules/
+.git/
+*.tar.gz
+*.bak*

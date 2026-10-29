@@ -6,9 +6,9 @@ services:
 
     environment:
       SLACK_TOKEN: "${SLACK_TOKEN}"
-      BOT_BASE_URL: "https://woffu.bofh.cat"
-      WOFFU_BASE_URL: "https://app.woffu.com"
-      PORT: "8001"
+      BOT_BASE_URL: "${BOT_BASE_URL}"
+      WOFFU_BASE_URL: "${WOFFU_BASE_URL}"
+      PORT: "${PORT}"
 
     volumes:
       - woffu-bot-data:/data
@@ -19,21 +19,21 @@ services:
     labels:
       - "traefik.enable=true"
 
-      # Router HTTPS (domini del bot)
-      - "traefik.http.routers.woffu-bot.rule=Host(`woffu.bofh.cat`)"
+      # Router HTTPS
+      - "traefik.http.routers.woffu-bot.rule=Host(`${WOFFU_HOST}`)"
       - "traefik.http.routers.woffu-bot.entrypoints=websecure"
       - "traefik.http.routers.woffu-bot.tls.certresolver=le"
 
-      # Router HTTP -> redirecció a HTTPS
-      - "traefik.http.routers.woffu-bot-redirect.rule=Host(`woffu.bofh.cat`)"
+      # Router HTTP -> HTTPS
+      - "traefik.http.routers.woffu-bot-redirect.rule=Host(`${WOFFU_HOST}`)"
       - "traefik.http.routers.woffu-bot-redirect.entrypoints=web"
       - "traefik.http.routers.woffu-bot-redirect.middlewares=redirect-to-https"
 
-      # Middleware de redirecció (reutilitzable)
+      # Middleware HTTP -> HTTPS
       - "traefik.http.middlewares.redirect-to-https.redirectscheme.scheme=https"
 
-      # Port intern del servei (el Koa escolta a 8001)
-      - "traefik.http.services.woffu-bot.loadbalancer.server.port=8001"
+      # Port intern
+      - "traefik.http.services.woffu-bot.loadbalancer.server.port=${PORT}"
 
 volumes:
   woffu-bot-data:
@@ -42,4 +42,3 @@ networks:
   traefik-proxy:
     external: true
     name: traefik-proxy
-
