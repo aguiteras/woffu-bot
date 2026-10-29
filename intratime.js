@@ -104,21 +104,70 @@ const headers = (token) => ({
   Authorization: `Bearer ${token}`,
 });
 
-async function login(username, password) {
-  const result = await post(`${WOFFU_BASE_URL}/token`, {
-    form: {
-      grant_type: "password",
-      username,
-      password,
-    },
-  });
-  const { access_token } = JSON.parse(result.body);
+async function consolidateWorkDay(token, payload) {
+  const signs = payload.Signs.map((sign) => {
+    const signDate = applyTimeString(new Date(payload.Date), sign.Time);
 
-  if (!access_token) {
-    console.log(result.body);
-    throw new Error("permission denied");
+    return {
+      Date: signDate.toISOString(),
+      SignIn: sign.SignIn,
+    };
+  });
+
+  const newPayload = {
+    WorkingDay: payload.Date,
+    UserId: payload.UserId,
+    Signs: signs,
+  };
+
+  const res = await post(`${WOFFU_BASE_URL}/api/v1/signs/consolidation`, {
+    headers: headers(token),
+    json: newPayload,
+  });
+
+  if (res.statusCode >= 400) {
+    let msg = `Woffu error ${res.statusCode}`;
+
+    try {
+      if (res.body && res.body.Message) {
+        msg += `: ${res.body.Message}`;
+      } else if (res.body) {
+        msg += `: ${JSON.stringify(res.body)}`;
+      }
+    } catch (e) {}
+
+    throw new Error(msg);
   }
-  return access_token;
+
+  return res.body;
+}
+
+async function login(username, password) {
+  const result = await post(
+    `${WOFFU_BASE_URL}/api/svc/accounts/authorization/token`,
+    {
+      form: {
+        grant_type: "password",
+        username,
+        password,
+      },
+      json: true,
+    }
+  );
+
+  if (result.statusCode >= 400) {
+    throw new Error(`Woffu login error ${result.statusCode}`);
+  }
+
+  const token =
+    result.body?.accessToken ||
+    result.body?.access_token;
+
+  if (!token) {
+    throw new Error("Woffu login succeeded but no access token was returned");
+  }
+
+  return token;
 }
 
 async function fillAllDay(db, token, date) {
@@ -147,34 +196,164 @@ async function fillHalfDay(db, token, date) {
   });
 }
 
+function modernSign(UserId, date, time, signIn) {
+  const [hh, mm, ss] = time.split(":").map(Number);
+
+  const signDate = new Date(date);
+  signDate.setHours(hh, mm, ss || 0, 0);
+
+  return {
+    signId: 0,
+    userId: UserId,
+    date: signDate.toISOString(),
+    trueDate: signDate.toISOString(),
+    signIn,
+
+    ip: null,
+    latitude: null,
+    longitude: null,
+    outside: null,
+
+    time,
+    valueTime: time,
+    shortTime: time,
+    shortTrueTime: time,
+    shortValueTime: time,
+    utcTime: `${time} +0`,
+
+    code: null,
+    signType: 3,
+    signStatus: 1,
+    signEventId: null,
+    deviceId: null,
+    deviceType: 0,
+    deleted: false,
+    updatedOn: null,
+    requestId: null,
+    agreementEventId: null,
+  };
+}
+
+function generateModernWorkDay(UserId, date, options = {}) {
+  const {
+    startAt8 = false,
+    legacy = false,
+  } = options;
+
+  const d = new Date(date);
+  const day = d.getDay();
+
+  if (day === 0 || day === 6) {
+    throw new Error("No work-day schedule defined for weekends");
+  }
+
+  let checkIn;
+  let checkOut;
+
+  if (legacy) {
+    checkIn = startAt8 ? "08:00:00" : "09:00:00";
+    checkOut = startAt8 ? "17:00:00" : "18:00:00";
+  } else if (day >= 1 && day <= 4) {
+    checkIn = startAt8 ? "08:00:00" : "09:00:00";
+    checkOut = startAt8 ? "17:30:00" : "18:30:00";
+  } else {
+    // Friday
+    checkIn = "09:00:00";
+    checkOut = "16:00:00";
+  }
+
+  const in1 = modernSign(UserId, d, checkIn, true);
+  const out1 = modernSign(UserId, d, "13:00:00", false);
+  const in2 = modernSign(UserId, d, "14:00:00", true);
+  const out2 = modernSign(UserId, d, checkOut, false);
+
+  const dateString =
+    `${d.getFullYear()}-` +
+    `${String(d.getMonth() + 1).padStart(2, "0")}-` +
+    `${String(d.getDate()).padStart(2, "0")}`;
+
+  return {
+    date: dateString,
+    comments: "",
+    userId: UserId,
+
+    slots: [
+      {
+        id: "slot-0",
+        in: in1,
+        out: out1,
+        motive: null,
+        totalMin: minutesBetween(checkIn, "13:00:00"),
+      },
+      {
+        id: "slot-1",
+        in: in2,
+        out: out2,
+        motive: null,
+        totalMin: minutesBetween("14:00:00", checkOut),
+      },
+    ],
+  };
+}
+
+function minutesBetween(start, end) {
+  const toMinutes = (value) => {
+    const [h, m] = value.split(":").map(Number);
+    return h * 60 + m;
+  };
+
+  return toMinutes(end) - toMinutes(start);
+}
+
+async function putModernWorkDay(token, date, options = {}) {
+  const { UserId } = jwt_decode(token);
+
+  if (!UserId) {
+    throw new Error("No UserId found in Woffu token");
+  }
+
+  const payload = generateModernWorkDay(
+    UserId,
+    date,
+    options
+  );
+
+  const res = await put(
+    `${WOFFU_BASE_URL}/api/svc/core/users/${UserId}/diarysummaries/workday/slots/self`,
+    {
+      headers: headers(token),
+      json: payload,
+    }
+  );
+
+  if (res.statusCode >= 400) {
+    const body =
+      typeof res.body === "string"
+        ? res.body
+        : JSON.stringify(res.body);
+
+    throw new Error(
+      `Woffu error ${res.statusCode}: ${body || "empty response"}`
+    );
+  }
+
+  return true;
+}
+
 async function fillWorkDay(db, token, date, options = {}) {
   if (isToday(date)) {
     enqueueFill(db, token, date, true, {
       workDay: true,
       startAt8: !!options.startAt8,
     });
+
     return "scheduled";
   }
 
-  const { UserId } = jwt_decode(token);
-  const payload = generateWorkDay(UserId, date, options);
-
-  const res = await put(`${WOFFU_BASE_URL}/api/diaries/selfSigns`, {
-    headers: headers(token),
-    json: payload,
+  return putModernWorkDay(token, date, {
+    startAt8: !!options.startAt8,
+    legacy: false,
   });
-
-  if (res.statusCode >= 400) {
-    let msg = `Woffu error ${res.statusCode}`;
-    try {
-      if (res.body && res.body.Message) {
-        msg += `: ${res.body.Message}`;
-      }
-    } catch (e) {}
-    throw new Error(msg);
-  }
-
-  return true;
 }
 
 async function fillWorkRange(db, token, startDate, endDate, options = {}) {
@@ -207,28 +386,14 @@ async function fillWorkDayLegacy(db, token, date, options = {}) {
       workDayMode: "legacy",
       startAt8: !!options.startAt8,
     });
+
     return "scheduled";
   }
 
-  const { UserId } = jwt_decode(token);
-  const payload = generateWorkDayLegacy(UserId, date, options);
-
-  const res = await put(`${WOFFU_BASE_URL}/api/diaries/selfSigns`, {
-    headers: headers(token),
-    json: payload,
+  return putModernWorkDay(token, date, {
+    startAt8: !!options.startAt8,
+    legacy: true,
   });
-
-  if (res.statusCode >= 400) {
-    let msg = `Woffu error ${res.statusCode}`;
-    try {
-      if (res.body && res.body.Message) {
-        msg += `: ${res.body.Message}`;
-      }
-    } catch (e) {}
-    throw new Error(msg);
-  }
-
-  return true;
 }
 
 async function fillWorkRangeLegacy(db, token, startDate, endDate, options = {}) {
